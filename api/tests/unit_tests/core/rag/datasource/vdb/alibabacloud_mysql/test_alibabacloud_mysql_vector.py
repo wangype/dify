@@ -643,6 +643,260 @@ class TestAlibabaCloudMySQLVector(unittest.TestCase):
     @patch(
         "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
     )
+    def test_search_by_full_text_empty_query(self, mock_pool_class):
+        """Test full-text search with empty query returns empty list."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+
+        # Test empty string
+        docs = vector_store.search_by_full_text("", top_k=5)
+        assert len(docs) == 0
+
+        # Test whitespace-only string
+        docs = vector_store.search_by_full_text("   ", top_k=5)
+        assert len(docs) == 0
+
+        # Test None-like empty string
+        docs = vector_store.search_by_full_text("  \t\n  ", top_k=5)
+        assert len(docs) == 0
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
+    def test_search_by_full_text_with_score_threshold(self, mock_pool_class):
+        """Test full-text search with score threshold filtering."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+        mock_cursor.__iter__ = lambda self: iter(
+            [
+                {
+                    "meta": {"doc_id": "doc1", "source": "test"},
+                    "text": "High relevance document about machine learning",
+                    "score": 2.5,
+                },
+                {
+                    "meta": {"doc_id": "doc2", "source": "test"},
+                    "text": "Low relevance document",
+                    "score": 0.3,
+                },
+                {
+                    "meta": {"doc_id": "doc3", "source": "test"},
+                    "text": "Medium relevance document",
+                    "score": 1.0,
+                },
+            ]
+        )
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+        docs = vector_store.search_by_full_text("machine learning", top_k=5, score_threshold=1.0)
+
+        # Only documents with score >= 1.0 should be returned
+        assert len(docs) == 2
+        assert docs[0].metadata["score"] == 2.5
+        assert docs[1].metadata["score"] == 1.0
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
+    def test_search_by_full_text_boolean_mode(self, mock_pool_class):
+        """Test full-text search in boolean mode."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+        mock_cursor.__iter__ = lambda self: iter(
+            [
+                {
+                    "meta": {"doc_id": "doc1", "source": "test"},
+                    "text": "Document about machine learning and AI",
+                    "score": 1.5,
+                }
+            ]
+        )
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+        docs = vector_store.search_by_full_text("+machine +learning", top_k=5, search_mode="boolean")
+
+        assert len(docs) == 1
+
+        # Verify the SQL uses BOOLEAN MODE
+        execute_calls = mock_cursor.execute.call_args_list
+        search_calls = [call for call in execute_calls if "MATCH" in str(call)]
+        assert len(search_calls) > 0
+        search_call = search_calls[0]
+        assert "IN BOOLEAN MODE" in search_call[0][0]
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
+    def test_search_by_full_text_natural_mode_default(self, mock_pool_class):
+        """Test full-text search defaults to natural language mode."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+        mock_cursor.__iter__ = lambda self: iter([])
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+        vector_store.search_by_full_text("machine learning", top_k=5)
+
+        # Verify the SQL uses NATURAL LANGUAGE MODE by default
+        execute_calls = mock_cursor.execute.call_args_list
+        search_calls = [call for call in execute_calls if "MATCH" in str(call)]
+        assert len(search_calls) > 0
+        search_call = search_calls[0]
+        assert "IN NATURAL LANGUAGE MODE" in search_call[0][0]
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
+    def test_search_by_full_text_mysql_error_handling(self, mock_pool_class):
+        """Test full-text search handles MySQL errors gracefully."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+
+        # Simulate MySQL error during search
+        def execute_side_effect(*args, **kwargs):
+            if "MATCH" in args[0]:
+                raise MySQLError(errno=1064, msg="Syntax error in full-text query")
+
+        mock_cursor.execute.side_effect = execute_side_effect
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+        # Should return empty list instead of raising exception
+        docs = vector_store.search_by_full_text("test query", top_k=5)
+
+        assert len(docs) == 0
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
+    def test_search_by_full_text_json_metadata(self, mock_pool_class):
+        """Test full-text search correctly parses JSON string metadata."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+        # Return metadata as JSON string (as it might come from the database)
+        mock_cursor.__iter__ = lambda self: iter(
+            [
+                {
+                    "meta": json.dumps({"doc_id": "doc1", "source": "test", "extra": "data"}),
+                    "text": "Test document content",
+                    "score": 1.5,
+                }
+            ]
+        )
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+        docs = vector_store.search_by_full_text("test", top_k=5)
+
+        assert len(docs) == 1
+        assert docs[0].metadata["doc_id"] == "doc1"
+        assert docs[0].metadata["source"] == "test"
+        assert docs[0].metadata["extra"] == "data"
+        assert docs[0].metadata["score"] == 1.5
+
+    def test_escape_boolean_query(self):
+        """Test escaping special characters in boolean mode queries."""
+        # Create a mock vector store to test the helper method
+        with patch(
+            "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector."
+            "mysql.connector.pooling.MySQLConnectionPool"
+        ) as mock_pool_class:
+            mock_pool = MagicMock()
+            mock_pool_class.return_value = mock_pool
+            mock_conn = MagicMock()
+            mock_cursor = MagicMock()
+            mock_pool.get_connection.return_value = mock_conn
+            mock_conn.cursor.return_value = mock_cursor
+            mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+
+            vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+
+            # Test escaping various special characters
+            assert vector_store._escape_boolean_query("test@email.com") == "test\\@email.com"
+            assert vector_store._escape_boolean_query("(test)") == "\\(test\\)"
+            assert vector_store._escape_boolean_query("a < b > c") == "a \\< b \\> c"
+            assert vector_store._escape_boolean_query("~test") == "\\~test"
+
+            # Test that valid boolean operators are preserved
+            assert vector_store._escape_boolean_query("+required -excluded") == "+required -excluded"
+            assert vector_store._escape_boolean_query('"exact phrase"') == '"exact phrase"'
+            assert vector_store._escape_boolean_query("prefix*") == "prefix*"
+
+            # Test combined special characters
+            assert vector_store._escape_boolean_query("test@(example)") == "test\\@\\(example\\)"
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
+    def test_search_by_full_text_query_trimming(self, mock_pool_class):
+        """Test that query is properly trimmed before search."""
+        # Mock the connection pool
+        mock_pool = MagicMock()
+        mock_pool_class.return_value = mock_pool
+
+        mock_conn = MagicMock()
+        mock_cursor = MagicMock()
+        mock_pool.get_connection.return_value = mock_conn
+        mock_conn.cursor.return_value = mock_cursor
+        mock_cursor.fetchone.side_effect = [{"VERSION()": "8.0.36"}, {"vector_support": True}]
+        mock_cursor.__iter__ = lambda self: iter([])
+
+        vector_store = AlibabaCloudMySQLVector(self.collection_name, self.config)
+        vector_store.search_by_full_text("  machine learning  ", top_k=5)
+
+        # Verify the query is trimmed in the SQL parameters
+        execute_calls = mock_cursor.execute.call_args_list
+        search_calls = [call for call in execute_calls if "MATCH" in str(call)]
+        assert len(search_calls) > 0
+        search_call = search_calls[0]
+        # The first two parameters should be the trimmed query
+        assert search_call[0][1][0] == "machine learning"
+        assert search_call[0][1][1] == "machine learning"
+
+    @patch(
+        "core.rag.datasource.vdb.alibabacloud_mysql.alibabacloud_mysql_vector.mysql.connector.pooling.MySQLConnectionPool"
+    )
     def test_delete_collection(self, mock_pool_class):
         """Test deleting the entire collection."""
         # Mock the connection pool
