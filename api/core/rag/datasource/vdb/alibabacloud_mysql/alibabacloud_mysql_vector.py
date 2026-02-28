@@ -278,40 +278,88 @@ class AlibabaCloudMySQLVector(BaseVector):
             return docs
 
     def search_by_full_text(self, query: str, **kwargs: Any) -> list[Document]:
+        """
+        Perform full-text search using MySQL FULLTEXT index with ngram parser.
+
+        :param query: The search query string.
+        :param kwargs: Additional parameters:
+            - top_k: Maximum number of results (default: 5)
+            - score_threshold: Minimum relevance score filter (default: 0.0)
+            - document_ids_filter: List of document IDs to filter by
+            - search_mode: 'natural' (default) or 'boolean' for advanced queries
+        :return: List of Documents matching the query sorted by relevance.
+        """
         top_k = kwargs.get("top_k", 5)
         if not isinstance(top_k, int) or top_k <= 0:
             raise ValueError("top_k must be a positive integer")
 
+        if not query or not query.strip():
+            return []
+
+        search_mode = kwargs.get("search_mode", "natural")
+        score_threshold = float(kwargs.get("score_threshold") or 0.0)
+
         document_ids_filter = kwargs.get("document_ids_filter")
         where_clause = ""
-        params = []
+        params: list[Any] = []
 
         if document_ids_filter:
             placeholders = ",".join(["%s"] * len(document_ids_filter))
             where_clause = f" AND JSON_UNQUOTE(JSON_EXTRACT(meta, '$.document_id')) IN ({placeholders}) "
             params.extend(document_ids_filter)
 
-        with self._get_cursor() as cur:
-            # Build query parameters: query (twice for MATCH clauses), document_ids_filter (if any), top_k
-            query_params = [query, query] + params + [top_k]
-            cur.execute(
-                f"""SELECT meta, text,
-                    MATCH(text) AGAINST(%s IN NATURAL LANGUAGE MODE) AS score
+        search_query = query.strip()
+        if search_mode == "boolean":
+            mode_clause = "IN BOOLEAN MODE"
+            search_query = self._escape_boolean_query(search_query)
+        else:
+            mode_clause = "IN NATURAL LANGUAGE MODE"
+
+        try:
+            with self._get_cursor() as cur:
+                sql = f"""SELECT meta, text,
+                        MATCH(text) AGAINST(%s {mode_clause}) AS score
                     FROM {self.table_name}
-                    WHERE MATCH(text) AGAINST(%s IN NATURAL LANGUAGE MODE)
+                    WHERE MATCH(text) AGAINST(%s {mode_clause})
                     {where_clause}
                     ORDER BY score DESC
-                    LIMIT %s""",
-                query_params,
-            )
-            docs = []
-            for record in cur:
-                metadata = record["meta"]
-                if isinstance(metadata, str):
-                    metadata = json.loads(metadata)
-                metadata["score"] = float(record["score"])
-                docs.append(Document(page_content=record["text"], metadata=metadata))
-        return docs
+                    LIMIT %s"""
+
+                query_params = [search_query, search_query] + params + [top_k]
+                cur.execute(sql, query_params)
+
+                docs = []
+                for record in cur:
+                    try:
+                        score = float(record["score"])
+                        if score < score_threshold:
+                            continue
+
+                        metadata = record["meta"]
+                        if isinstance(metadata, str):
+                            metadata = json.loads(metadata)
+                        metadata["score"] = score
+                        docs.append(Document(page_content=record["text"], metadata=metadata))
+                    except (ValueError, json.JSONDecodeError) as e:
+                        logger.warning("Error processing full-text search result: %s", e)
+                        continue
+                return docs
+        except MySQLError:
+            logger.exception("Full-text search failed")
+            return []
+
+    def _escape_boolean_query(self, query: str) -> str:
+        """
+        Escape special characters for MySQL BOOLEAN MODE full-text search.
+
+        MySQL boolean mode operators: + - > < ( ) ~ * " @
+        These need to be escaped or handled properly to avoid syntax errors.
+        """
+        special_chars = ["@", "(", ")", "<", ">", "~"]
+        escaped_query = query
+        for char in special_chars:
+            escaped_query = escaped_query.replace(char, f"\\{char}")
+        return escaped_query
 
     def delete(self):
         with self._get_cursor() as cur:
